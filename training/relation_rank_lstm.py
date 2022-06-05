@@ -24,7 +24,7 @@ from evaluator import evaluate
 
 seed = 123456789
 np.random.seed(seed)
-tf.set_random_seed(seed)
+tf.random.set_seed(seed)
 
 class ReRaLSTM:
     def __init__(self, data_path, market_name, tickers_fname, relation_name,
@@ -33,7 +33,7 @@ class ReRaLSTM:
         seed = 123456789
         random.seed(seed)
         np.random.seed(seed)
-        tf.set_random_seed(seed)
+        tf.random.set_seed(seed)
 
         self.data_path = data_path
         self.market_name = market_name
@@ -101,12 +101,12 @@ class ReRaLSTM:
             device_name = '/cpu:0'
         print('device name:', device_name)
         with tf.device(device_name):
-            tf.reset_default_graph()
+            tf.compat.v1.reset_default_graph()
 
             seed = 123456789
             random.seed(seed)
             np.random.seed(seed)
-            tf.set_random_seed(seed)
+            tf.random.set_seed(seed)
 
             ground_truth = tf.placeholder(tf.float32, [self.batch_size, 1])
             mask = tf.placeholder(tf.float32, [self.batch_size, 1])
@@ -384,7 +384,7 @@ if __name__ == '__main__':
     desc = 'train a relational rank lstm model'
     parser = argparse.ArgumentParser(description=desc)
     parser.add_argument('-p', help='path of EOD data',
-                        default='../data/2013-01-01')
+                        default='data/2013-01-01')
     parser.add_argument('-m', help='market name', default='NASDAQ')
     parser.add_argument('-t', help='fname for selected tickers')
     parser.add_argument('-l', default=4,
@@ -397,7 +397,7 @@ if __name__ == '__main__':
                         help='learning rate')
     parser.add_argument('-a', default=1,
                         help='alpha, the weight of ranking loss')
-    parser.add_argument('-g', '--gpu', type=int, default=0, help='use gpu')
+    parser.add_argument('-g', '--gpu', type=int, default=1, help='use gpu')
 
     parser.add_argument('-e', '--emb_file', type=str,
                         default='NASDAQ_rank_lstm_seq-16_unit-64_2.csv.npy',

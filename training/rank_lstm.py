@@ -21,6 +21,52 @@ except ImportError:
 from load_data import load_EOD_data
 from evaluator import evaluate
 
+class Model:
+
+    def __init__(self, units, alpha, batch_size, learning_rate):
+        self.keras_model = tf.keras.Sequential(
+                layers = [
+                    tf.keras.layers.LSTM(units), # the default setting is to return last output and do not return state sequence
+                    tf.keras.layers.Dense(units=1, activation=tf.nn.leaky_relu,
+                    kernel_initializer="glorot_uniform")
+                ]
+            )
+        self.alpha = alpha
+        self.batch_size = batch_size
+        self.optimizer = tf.keras.optimizers.Adam(
+                learning_rate=learning_rate
+            )
+
+    def forward(self, feature, mask, ground_truth, base_price):
+        all_one = tf.ones([self.batch_size, 1])
+        prediction = self.keras_model(feature)
+        return_ratio = (prediction - base_price) / base_price
+        mse = tf.keras.losses.MeanSquaredError()
+        reg_loss = mse(ground_truth, return_ratio, sample_weight = mask)
+
+        pre_pw_dif = tf.subtract(
+            tf.matmul(return_ratio, all_one, transpose_b=True),
+            tf.matmul(all_one, return_ratio, transpose_b=True)
+        )
+        gt_pw_dif = tf.subtract(
+            tf.matmul(all_one, ground_truth, transpose_b=True),
+            tf.matmul(ground_truth, all_one, transpose_b=True)
+        )
+        mask_pw = tf.matmul(mask, mask, transpose_b=True)
+        rank_loss = tf.reduce_mean(
+            tf.nn.relu(
+                tf.multiply(
+                    tf.multiply(pre_pw_dif, gt_pw_dif),
+                    mask_pw
+                )
+            )
+        )
+        loss = reg_loss + self.alpha * rank_loss
+
+        return loss, reg_loss, rank_loss, return_ratio
+        
+
+
 class RankLSTM:
     def __init__(self, data_path, market_name, tickers_fname, parameters,
                  steps=1, epochs=50, batch_size=None, gpu=False):
@@ -74,63 +120,17 @@ class RankLSTM:
             device_name = '/cpu:0'
         print('device name:', device_name)
         with tf.device(device_name):
-            tf.reset_default_graph()
+            # tf.reset_default_graph()
 
-            ground_truth = tf.placeholder(tf.float32, [self.batch_size, 1])
-            mask = tf.placeholder(tf.float32, [self.batch_size, 1])
-            feature = tf.placeholder(tf.float32,
-                [self.batch_size, self.parameters['seq'], self.fea_dim])
-            base_price = tf.placeholder(tf.float32, [self.batch_size, 1])
-            all_one = tf.ones([self.batch_size, 1], dtype=tf.float32)
+            # ground_truth = tf.placeholder(tf.float32, [self.batch_size, 1])
+            # mask = tf.placeholder(tf.float32, [self.batch_size, 1])
+            # feature = tf.placeholder(tf.float32,
+            #     [self.batch_size, self.parameters['seq'], self.fea_dim])
+            # base_price = tf.placeholder(tf.float32, [self.batch_size, 1])
+            # all_one = tf.ones([self.batch_size, 1], dtype=tf.float32)
 
-            lstm_cell = tf.contrib.rnn.BasicLSTMCell(
-                self.parameters['unit']
-            )
+            self.model = Model(self.parameters['unit'], self.parameters['alpha'], self.batch_size, self.parameters['lr'])
 
-            initial_state = lstm_cell.zero_state(self.batch_size,
-                                                 dtype=tf.float32)
-            outputs, _ = tf.nn.dynamic_rnn(
-                lstm_cell, feature, dtype=tf.float32,
-                initial_state=initial_state
-            )
-
-            seq_emb = outputs[:, -1, :]
-            # One hidden layer
-            prediction = tf.layers.dense(
-                seq_emb, units=1, activation=leaky_relu, name='reg_fc',
-                kernel_initializer=tf.glorot_uniform_initializer()
-            )
-
-            return_ratio = tf.div(tf.subtract(prediction, base_price), base_price)
-            reg_loss = tf.losses.mean_squared_error(
-                ground_truth, return_ratio, weights=mask
-            )
-            pre_pw_dif = tf.subtract(
-                tf.matmul(return_ratio, all_one, transpose_b=True),
-                tf.matmul(all_one, return_ratio, transpose_b=True)
-            )
-            gt_pw_dif = tf.subtract(
-                tf.matmul(all_one, ground_truth, transpose_b=True),
-                tf.matmul(ground_truth, all_one, transpose_b=True)
-            )
-            mask_pw = tf.matmul(mask, mask, transpose_b=True)
-            rank_loss = tf.reduce_mean(
-                tf.nn.relu(
-                    tf.multiply(
-                        tf.multiply(pre_pw_dif, gt_pw_dif),
-                        mask_pw
-                    )
-                )
-            )
-            loss = reg_loss + tf.cast(self.parameters['alpha'], tf.float32) * \
-                              rank_loss
-
-            optimizer = tf.train.AdamOptimizer(
-                learning_rate=self.parameters['lr']
-            ).minimize(loss)
-
-        sess = tf.Session()
-        sess.run(tf.global_variables_initializer())
 
         best_valid_pred = np.zeros(
             [len(self.tickers), self.test_index - self.valid_index],
@@ -179,18 +179,17 @@ class RankLSTM:
                            self.steps + 1):
                 eod_batch, mask_batch, price_batch, gt_batch = self.get_batch(
                     batch_offsets[j])
-                feed_dict = {
-                    feature: eod_batch,
-                    mask: mask_batch,
-                    ground_truth: gt_batch,
-                    base_price: price_batch
-                }
-                cur_loss, cur_reg_loss, cur_rank_loss, batch_out = \
-                    sess.run((loss, reg_loss, rank_loss, optimizer),
-                             feed_dict)
-                tra_loss += cur_loss
-                tra_reg_loss += cur_reg_loss
-                tra_rank_loss += cur_rank_loss
+
+
+                with tf.GradientTape() as tape:
+                    cur_loss, cur_reg_loss, cur_rank_loss, _ = self.model.forward(eod_batch, mask_batch, gt_batch, price_batch)
+                    
+                grads = tape.gradient(cur_loss, self.model.keras_model.trainable_weights)
+                self.model.optimizer.apply_gradients(zip(grads, self.model.keras_model.trainable_weights))
+                
+                tra_loss += cur_loss.numpy()
+                tra_reg_loss += cur_reg_loss.numpy()
+                tra_rank_loss += cur_rank_loss.numpy()
             print('Train Loss:',
                   tra_loss / (self.valid_index - self.parameters['seq'] - self.steps + 1),
                   tra_reg_loss / (self.valid_index - self.parameters['seq'] - self.steps + 1),
@@ -218,23 +217,16 @@ class RankLSTM:
             ):
                 eod_batch, mask_batch, price_batch, gt_batch = self.get_batch(
                     cur_offset)
-                feed_dict = {
-                    feature: eod_batch,
-                    mask: mask_batch,
-                    ground_truth: gt_batch,
-                    base_price: price_batch
-                }
-                cur_loss, cur_reg_loss, cur_rank_loss, cur_semb, cur_rr, = \
-                    sess.run((loss, reg_loss, rank_loss, seq_emb,
-                              return_ratio), feed_dict)
+                
+                cur_loss, cur_reg_loss, cur_rank_loss, cur_rr = self.model.forward(eod_batch, mask_batch, gt_batch, price_batch)
 
-                val_loss += cur_loss
-                val_reg_loss += cur_reg_loss
-                val_rank_loss += cur_rank_loss
+                val_loss += cur_loss.numpy()
+                val_reg_loss += cur_reg_loss.numpy()
+                val_rank_loss += cur_rank_loss.numpy()
                 cur_valid_pred[:, cur_offset - (self.valid_index -
                                                 self.parameters['seq'] -
                                                 self.steps + 1)] = \
-                    copy.copy(cur_rr[:, 0])
+                    copy.copy(cur_rr.numpy()[:, 0])
                 cur_valid_gt[:, cur_offset - (self.valid_index -
                                               self.parameters['seq'] -
                                               self.steps + 1)] = \
@@ -273,24 +265,17 @@ class RankLSTM:
             ):
                 eod_batch, mask_batch, price_batch, gt_batch = self.get_batch(
                     cur_offset)
-                feed_dict = {
-                    feature: eod_batch,
-                    mask: mask_batch,
-                    ground_truth: gt_batch,
-                    base_price: price_batch
-                }
-                cur_loss, cur_reg_loss, cur_rank_loss, cur_semb, cur_rr = \
-                    sess.run((loss, reg_loss, rank_loss, seq_emb,
-                              return_ratio), feed_dict)
 
-                test_loss += cur_loss
-                test_reg_loss += cur_reg_loss
-                test_rank_loss += cur_rank_loss
+                cur_loss, cur_reg_loss, cur_rank_loss, cur_rr = self.model.forward(eod_batch, mask_batch, gt_batch, price_batch)
+
+                test_loss += cur_loss.numpy()
+                test_reg_loss += cur_reg_loss.numpy()
+                test_rank_loss += cur_rank_loss.numpy()
 
                 cur_test_pred[:, cur_offset - (self.test_index -
                                                self.parameters['seq'] -
                                                self.steps + 1)] = \
-                    copy.copy(cur_rr[:, 0])
+                    copy.copy(cur_rr.numpy()[:, 0])
                 cur_test_gt[:, cur_offset - (self.test_index -
                                              self.parameters['seq'] -
                                              self.steps + 1)] = \
@@ -325,8 +310,6 @@ class RankLSTM:
             print('epoch:', i, ('time: %.4f ' % (t4 - t1)))
         print('\nBest Valid performance:', best_valid_perf)
         print('\tBest Test performance:', best_test_perf)
-        sess.close()
-        tf.reset_default_graph()
 
         return best_valid_pred, best_valid_gt, best_valid_mask, \
                best_test_pred, best_test_gt, best_test_mask
@@ -341,7 +324,7 @@ if __name__ == '__main__':
     desc = 'train a rank lstm model'
     parser = argparse.ArgumentParser(description=desc)
     parser.add_argument('-p', help='path of EOD data',
-                        default='../data/2013-01-01')
+                        default='data/2013-01-01')
     parser.add_argument('-m', help='market name', default='NASDAQ')
     parser.add_argument('-t', help='fname for selected tickers')
     parser.add_argument('-l', default=4,
@@ -354,7 +337,7 @@ if __name__ == '__main__':
                         help='learning rate')
     parser.add_argument('-a', default=1,
                         help='alpha, the weight of ranking loss')
-    parser.add_argument('-g', '--gpu', type=int, default=0, help='use gpu')
+    parser.add_argument('-g', '--gpu', type=int, default=1, help='use gpu')
     args = parser.parse_args()
 
     if args.t is None:
